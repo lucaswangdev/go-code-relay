@@ -8,33 +8,30 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"sync"
 
 	"github.com/gorilla/websocket"
 )
 
 var version = "dev"
 
-// Message represents a WebSocket message
 type Message struct {
-	Type    string `json:"type"`
-	Content string `json:"content,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Type     string   `json:"type"`
+	Content  string   `json:"content,omitempty"`
+	Error    string   `json:"error,omitempty"`
+	Modified []string `json:"modified,omitempty"`
+	Deleted  []string `json:"deleted,omitempty"`
 }
 
-// RelayClient WebSocket 客户端
 type RelayClient struct {
 	serverURL string
-	conn      *websocket.Conn
-	done      chan struct{}
+	conn     *websocket.Conn
+	done     chan struct{}
 	respReady chan struct{}
-	respText  string
-	mu        sync.Mutex
 }
 
 func NewRelayClient(serverURL string) *RelayClient {
 	return &RelayClient{
-		serverURL: serverURL,
+		serverURL:  serverURL,
 		done:      make(chan struct{}),
 		respReady: make(chan struct{}),
 	}
@@ -60,6 +57,17 @@ func (c *RelayClient) SendMessage(content string) error {
 
 func (c *RelayClient) Clear() error {
 	return c.conn.WriteJSON(Message{Type: "clear"})
+}
+
+func (c *RelayClient) GetDiff() ([]string, []string, error) {
+	if err := c.conn.WriteJSON(Message{Type: "diff"}); err != nil {
+		return nil, nil, err
+	}
+	var msg Message
+	if err := c.conn.ReadJSON(&msg); err != nil {
+		return nil, nil, err
+	}
+	return msg.Modified, msg.Deleted, nil
 }
 
 func (c *RelayClient) WaitForDone() error {
@@ -91,8 +99,7 @@ func (c *RelayClient) ReceiveLoop() {
 			case c.respReady <- struct{}{}:
 			default:
 			}
-		case "cleared":
-			// do nothing
+		case "cleared", "pong":
 		case "error":
 			fmt.Printf("\n错误: %s\n", msg.Error)
 			select {
@@ -138,7 +145,7 @@ func main() {
 	fmt.Println("Claude Code Relay")
 	fmt.Println("=" + strings.Repeat("=", 49))
 	fmt.Println("服务器:", serverURL)
-	fmt.Println("命令: /clear 清空历史, /quit 退出")
+	fmt.Println("命令: /clear 清空历史, /diff 显示变更, /quit 退出")
 	fmt.Println("=" + strings.Repeat("=", 49))
 	fmt.Println()
 
@@ -178,6 +185,21 @@ func main() {
 				fmt.Println("[历史已清空]")
 			}
 			continue
+		case "/diff":
+			modified, deleted, err := client.GetDiff()
+			if err != nil {
+				fmt.Printf("错误: %v\n", err)
+			} else if len(modified) == 0 && len(deleted) == 0 {
+				fmt.Println("[本次会话无文件变更]")
+			} else {
+				for _, f := range modified {
+					fmt.Printf("  M %s\n", f)
+				}
+				for _, f := range deleted {
+					fmt.Printf("  D %s\n", f)
+				}
+			}
+			continue
 		case "/help", "help":
 			printHelp()
 			continue
@@ -198,6 +220,7 @@ func printHelp() {
 	fmt.Println(`命令:
   /help     显示帮助
   /clear    清空对话历史
+  /diff     显示本次会话修改的文件
   /quit     退出程序
 
 直接输入内容与 Claude 对话`)
